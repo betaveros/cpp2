@@ -1,4 +1,5 @@
 {-# LANGUAGE TupleSections, FlexibleContexts #-}
+-- imports {{{
 import Control.Applicative hiding ((<|>), many)
 import Control.Monad
 import Data.Foldable (foldrM)
@@ -19,7 +20,18 @@ import Text.Parsec
 import Text.Printf
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-
+-- }}}
+-- character classes {{{
+isIdentifier :: Char -> Bool
+isIdentifier c = isDigit c || isAlpha c || c == '_'
+isIdentifierStart :: Char -> Bool
+isIdentifierStart c = isAlpha c || c == '_'
+isOperatorSymbol :: Char -> Bool
+isOperatorSymbol = (`elem` "!%&*+-/:<=>?^|~")
+isHighPrecedence :: Char -> Bool
+isHighPrecedence c = isIdentifier c || c `elem` "[](). "
+-- }}}
+-- non-parser string operations {{{
 -- we'd like to not strip newlines because that might mess up the line count
 lstrip :: String -> String
 lstrip = dropWhile (`elem` " \t")
@@ -34,6 +46,29 @@ lineify = dstrip . map f
           f '\r' = ' '
           f c = c
 
+maybeWrap :: String -> String
+maybeWrap s'
+    | all isHighPrecedence s = s
+    | otherwise = concat ["(", s, ")"]
+    where s = dstrip s'
+ampWrap :: String -> String
+ampWrap s
+    | all isAlpha s = '&' : s
+    | otherwise = "&(" ++ s ++ ")"
+-- }}}
+-- generic parser utilities {{{
+retcat :: (Monoid m) => [m] -> Parsec s u m
+retcat = return . mconcat
+
+catMany :: (Monoid m) => Parsec s u m -> Parsec s u m
+catMany = fmap mconcat . many
+catMany1 :: (Stream s Identity t, Monoid m) => Parsec s u m -> Parsec s u m
+catMany1 = fmap mconcat . many1
+
+anyStr1 :: (Stream s Identity Char) => Parsec s u String
+anyStr1 = (:[]) <$> anyChar
+-- }}}
+-- parser definition, state, state manipulation {{{
 type VarMap = Map String AType
 data CPP2State = CPP2State {
     hygienicRegister :: Int,
@@ -45,14 +80,6 @@ data CPP2State = CPP2State {
     mod1Value :: Maybe Integer
     } deriving Show
 type Parser = Parsec String CPP2State
-
-retcat :: [String] -> Parsec s u String
-retcat = return . concat
-
-catMany :: Parsec s u String -> Parsec s u String
-catMany = fmap concat . many
-catMany1 :: (Stream s Identity t) => Parsec s u String -> Parsec s u String
-catMany1 = fmap concat . many1
 
 initState :: CPP2State
 initState = CPP2State {
@@ -76,6 +103,32 @@ increaseLineNumber = do
         outputToSourceMap = Map.insert o lno m
         }
 
+include :: String -> Parser ()
+include inc = modifyState (\st -> st { includes = Set.insert inc (includes st) })
+
+includeMod :: Parser ()
+includeMod = modifyState (\st -> st { hasMod = True })
+
+includeMod1 :: Parser ()
+includeMod1 = do
+    includeMod
+    st <- getState
+    case mod1Value st of
+        Nothing -> setState st { mod1Value = Just 1000000007 }
+        _ -> return ()
+
+getIncludes :: Parser [String]
+getIncludes = Set.toList . includes <$> getState
+
+
+getHygienicVariable :: Parser String
+getHygienicVariable = do
+    s <- getState
+    let i = hygienicRegister s
+    setState $ s { hygienicRegister = i + 1 }
+    return $ "_t" ++ show i
+-- }}}
+-- basic character-class and space parsers {{{
 spaces1 :: Parser String
 spaces1 = many1 ((try endOfLine <* increaseLineNumber) <|> space)
 
@@ -114,17 +167,25 @@ keyword s = try $ string s >> notFollowedBy (satisfy isIdentifier)
 (|=>) :: String -> b -> Parser b
 a |=> b = keyword a >> return b
 
-isIdentifier :: Char -> Bool
-isIdentifier c = isDigit c || isAlpha c || c == '_'
-isIdentifierStart :: Char -> Bool
-isIdentifierStart c = isAlpha c || c == '_'
+semic :: Parser ()
+semic = void $ char ';'
+
+idLike :: Parser String
+idLike = many (satisfy isIdentifier)
+
+identifier :: Parser String
+identifier = do
+    s <- satisfy isIdentifierStart
+    x <- idLike
+    return $ s : x
 
 macroKeyword :: Parser String
 macroKeyword = try $ do
     s <- identifier
     voidc '!'
     return s
-
+-- }}}
+-- fake type system {{{
 data AType = AInt | ALong | AChar
     | AArray String AType
     | AVector AType | ADeque AType | AList AType
@@ -151,24 +212,6 @@ getFmt _ = Nothing
 
 putType :: String -> AType -> Parser ()
 putType s t = modifyState (\st -> st { varMap = Map.insert s t (varMap st) })
-
-include :: String -> Parser ()
-include inc = modifyState (\st -> st { includes = Set.insert inc (includes st) })
-
-includeMod :: Parser ()
-includeMod = modifyState (\st -> st { hasMod = True })
-
-includeMod1 :: Parser ()
-includeMod1 = do
-    includeMod
-    st <- getState
-    case mod1Value st of
-        Nothing -> setState st { mod1Value = Just 1000000007 }
-        _ -> return ()
-
-getIncludes :: Parser [String]
-getIncludes = Set.toList . includes <$> getState
-
 getTypeMaybe :: String -> Parser (Maybe AType)
 getTypeMaybe s = do
     m <- varMap <$> getState
@@ -192,26 +235,44 @@ guessTypeMaybe s = do
             Just (AArray _ t) -> return (Just t)
             _ -> return Nothing
         _ -> return Nothing
+angledType :: Parser AType
+angledType = do
+    voidc '<'
+    voidw
+    t <- aType
+    voidw
+    voidc '>'
+    return t
 
-getHygienicVariable :: Parser String
-getHygienicVariable = do
-    s <- getState
-    let i = hygienicRegister s
-    setState $ s { hygienicRegister = i + 1 }
-    return $ "_t" ++ show i
+knownOneParamType :: String -> (AType -> AType) -> Parser AType
+knownOneParamType s tt = do
+    keyword s
+    voidw
+    t <- angledType <|> aType
+    include s
+    return $ tt t
 
-isOperatorSymbol :: Char -> Bool
-isOperatorSymbol = (`elem` "!%&*+-/:<=>?^|~")
+knownVectorType :: Parser AType
+knownVectorType = knownOneParamType "vector" AVector
+knownDequeType :: Parser AType
+knownDequeType = knownOneParamType "deque" ADeque
+knownListType :: Parser AType
+knownListType = knownOneParamType "list" AList
 
-semic :: Parser ()
-semic = void $ char ';'
+knownType :: Parser AType
+knownType =
+    "int" |=> AInt
+    <|> "ll" |=> ALong
+    <|> "long" |=> ALong
+    <|> "char" |=> AChar
+    <|> knownVectorType
+    <|> knownDequeType
+    <|> knownListType
 
-identifier :: Parser String
-identifier = do
-    s <- satisfy isIdentifierStart
-    x <- many (satisfy isIdentifier)
-    return $ s : x
-
+aType :: Parser AType
+aType = knownType <|> fmap AUnknown identifier
+-- }}}
+-- numbers, identifiers {{{
 billion :: Integer
 billion = 10^(9::Int)
 
@@ -222,10 +283,10 @@ numberLit = do
         voidc 'b' <|> voidc 'B'
         ps <- many digit
         let pv = if null ps then 0 else read ps
-        r <- many (satisfy isIdentifier)
+        r <- idLike
         return $ show (read c * billion + pv) ++ r
     postBillion <|> do
-        r <- many (satisfy isIdentifier)
+        r <- idLike
         return $ c ++ r
 
 checkedIdentifier :: Parser String
@@ -284,44 +345,8 @@ checkedIdentifier = do
         "unique" -> ig "algorithm"
         "vector" -> ig "vector"
         _ -> return x
-
-angledType :: Parser AType
-angledType = do
-    voidc '<'
-    voidw
-    t <- aType
-    voidw
-    voidc '>'
-    return t
-
-knownOneParamType :: String -> (AType -> AType) -> Parser AType
-knownOneParamType s tt = do
-    keyword s
-    voidw
-    t <- angledType <|> aType
-    include s
-    return $ tt t
-
-knownVectorType :: Parser AType
-knownVectorType = knownOneParamType "vector" AVector
-knownDequeType :: Parser AType
-knownDequeType = knownOneParamType "deque" ADeque
-knownListType :: Parser AType
-knownListType = knownOneParamType "list" AList
-
-knownType :: Parser AType
-knownType =
-    "int" |=> AInt
-    <|> "ll" |=> ALong
-    <|> "long" |=> ALong
-    <|> "char" |=> AChar
-    <|> knownVectorType
-    <|> knownDequeType
-    <|> knownListType
-
-aType :: Parser AType
-aType = knownType <|> fmap AUnknown identifier
-
+-- }}}
+-- chunk units and chunks, whatever that means {{{
 -- parse as little as possible of an expression or whatever while making sense
 -- useful if you want to paranoidly parse manyTill something
 chunkUnit :: Parser String
@@ -332,15 +357,7 @@ commaChunkUnit = chunkUnit <|> string ","
 semicChunkUnit :: Parser String
 semicChunkUnit = commaChunkUnit <|> string ";"
 
-isHighPrecedence :: Char -> Bool
-isHighPrecedence c = isIdentifier c || c `elem` "[](). "
-
-maybeWrap :: String -> String
-maybeWrap s'
-    | all isHighPrecedence s = s
-    | otherwise = concat ["(", s, ")"]
-    where s = dstrip s'
-
+-- sugar chunker {{{
 data LPSymbol = Min | Max | Minify | Maxify
     | Mod | ModPlus | ModMinus | ModTimes
     | ModPlusEq | ModMinusEq | ModTimesEq
@@ -409,6 +426,7 @@ combineAroundSymbol (s1,sym) s2 = case sym of
 sugarChunk :: [String] -> Parser String
 sugarChunk c = let (sl, sf) = readSugarList c
     in foldrM combineAroundSymbol sf sl
+-- }}}
 
 chunk :: Parser String
 chunk = many chunkUnit >>= sugarChunk
@@ -424,12 +442,8 @@ semicChunk = catMany semicChunkUnit
 
 chunkList :: Parser [String]
 chunkList = chunk `sepBy` string ","
-
-ampWrap :: String -> String
-ampWrap s
-    | all isAlpha s = '&' : s
-    | otherwise = "&(" ++ s ++ ")"
-
+-- }}}
+-- scanf, printf {{{
 scanfFor :: Bool -> [(AType, String)] -> String
 scanfFor skipFlag xs = concat [
         "scanf(\"",
@@ -553,6 +567,8 @@ postGetsCommand = do
         Just (AArray dim AChar) -> retcat ["fgets(", c, ", ", dim, ", stdin);"]
         Just _ -> parserFail $ "gets!: guessed type of " ++ show c ++ " not char[*]"
         Nothing -> parserFail $ "gets!: cannot infer type of " ++ show c
+-- }}}
+-- macroCommand {{{
 macroCommand :: Parser String
 macroCommand = do
     kw <- macroKeyword
@@ -580,7 +596,8 @@ macroCommand = do
         "repeat" -> postRepeatCommand
         "gcases" -> postRepeatCommand
         _ -> parserFail $ "unrecognized macro: " ++ kw
-
+-- }}}
+-- typeCommand {{{
 arrayBlock :: Parser (String, String)
 arrayBlock = do
     w <- waste
@@ -601,7 +618,8 @@ typeCommand = try $ do
             concat [w1, v, concatMap fst abks, c])) `sepBy` string ","
     forM_ ls $ \((v,abks),_) -> putType v (foldr AArray t abks)
     return $ showType t ++ intercalate "," (map snd ls)
-
+-- }}}
+-- brace paren bracket block {{{
 braceBlock :: Parser String
 braceBlock = do
     voidc '{'
@@ -622,10 +640,8 @@ bracketBlock = do
     s <- commaChunk
     voidc ']'
     retcat ["[", s, "]"]
-
-anyStr1 :: Parser String
-anyStr1 = (:[]) <$> anyChar
-
+-- }}}
+-- literal {{{
 backslashEscape :: Parser String
 backslashEscape = do
     voidc '\\'
@@ -647,7 +663,8 @@ charLit = do
 
 someLit :: Parser String
 someLit = stringLit <|> charLit
-
+-- }}}
+-- for {{{
 data ForStruct = ForStruct {
     varType :: AType,
     varInit :: String,
@@ -788,7 +805,8 @@ forStructure = do
     voidw
     fc <- forParenContent <|> forContentTilBrace
     retcat ["for (", fc, ")"]
-
+-- }}}
+-- if, else, while, switch, repeat {{{
 parenContent :: Parser String
 parenContent = do
     voidc '('
@@ -831,8 +849,8 @@ postRepeatCommand = do
     c <- rstrip <$> (parenContent <|> commaChunk)
     v <- getHygienicVariable
     retcat ["for (int ", v, " = ", c, "; ", v, " > 0; --", v, ")"]
-
--- More or less something outer-level command-like
+-- }}}
+-- stuff = More or less something outer-level command-like {{{
 stuff :: Parser String
 stuff =
     parenBlock <|> bracketBlock <|> braceBlock
@@ -867,7 +885,8 @@ allStuffDump = do
     return (unlines headerLines ++ s,
         st,
         snd . fromJust . flip Map.lookupLE otsm . max 1 . subtract (length headerLines))
-
+-- }}}
+-- main stuff {{{
 cppCompileParser :: String -> String -> (Int -> Int) -> Parsec String () String
 cppCompileParser orig new f = catMany (try p <|> (:[]) <$> anyChar)
     where p = do
@@ -933,10 +952,11 @@ mainArg arg rs = do
                         rcode <- waitForProcess rph
                         exitWith rcode
                     _ -> exitWith code
-
+-- }}}
 main :: IO ()
 main = do
     args <- getArgs
     case args of
         [] -> hPutStrLn stderr "cpp2: no input files"
         (arg:rs) -> mainArg arg rs
+-- vim:set fdm=marker:
