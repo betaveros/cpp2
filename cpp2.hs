@@ -1,15 +1,16 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TupleSections, FlexibleContexts #-}
 import Control.Applicative hiding ((<|>), many)
 import Control.Monad
 import Data.Foldable (foldrM)
-import Data.Function
+-- import Data.Function
+import Data.Functor.Identity
 import Data.Char
 import Data.List
 import Data.Map (Map)
 import Data.Monoid
 import Data.Maybe
 import Data.Set (Set)
-import Debug.Trace
+-- import Debug.Trace
 import System.Environment
 import System.IO
 import System.Process
@@ -44,6 +45,14 @@ data CPP2State = CPP2State {
     mod1Value :: Maybe Integer
     } deriving Show
 type Parser = Parsec String CPP2State
+
+retcat :: [String] -> Parsec s u String
+retcat = return . concat
+
+catMany :: Parsec s u String -> Parsec s u String
+catMany = fmap concat . many
+catMany1 :: (Stream s Identity t) => Parsec s u String -> Parsec s u String
+catMany1 = fmap concat . many1
 
 initState :: CPP2State
 initState = CPP2State {
@@ -91,10 +100,10 @@ comment = blockComment <|> lineComment
             return ""
 
 waste :: Parser String
-waste = fmap concat $ many (comment <|> spaces1)
+waste = catMany (comment <|> spaces1)
 
 waste1 :: Parser String
-waste1 = fmap concat $ many1 (comment <|> spaces1)
+waste1 = catMany1 (comment <|> spaces1)
 
 voidw :: Parser ()
 voidw = void $ many (comment <|> voidSpaces1)
@@ -109,7 +118,6 @@ isIdentifier :: Char -> Bool
 isIdentifier c = isDigit c || isAlpha c || c == '_'
 isIdentifierStart :: Char -> Bool
 isIdentifierStart c = isAlpha c || c == '_'
-
 
 macroKeyword :: Parser String
 macroKeyword = try $ do
@@ -368,7 +376,7 @@ readSugarList :: [String] -> ([(String, LPSymbol)], String)
 readSugarList [] = ([], "")
 readSugarList (x:xs) = case (readSugar x, readSugarList xs) of
     (Left s,  ([], sf)) -> ([], s ++ sf)
-    (Left s,  (((s', y') : r), sf)) -> (((s ++ s', y') : r), sf)
+    (Left s,  ((s', y') : r, sf)) -> ((s ++ s', y') : r, sf)
     (Right y, (r, sf)) -> (("", y) : r, sf)
 
 combineAroundSymbol :: (String, LPSymbol) -> String -> Parser String
@@ -382,15 +390,16 @@ combineAroundSymbol (s1,sym) s2 = case sym of
         PushFront  -> iac [rs s1, ".push_front(", ds s2, ")"]
         PopBack    -> iac [s1, "= ", w s2, ".back(); " , wli s2, ".pop_back()"]
         PopFront   -> iac [s1, "= ", w s2, ".front(); ", wli s2, ".pop_front()"]
-        Mod        -> includeMod >> return (concat ["_mod(", ds s1, ", ", ds s2, ")"])
-        ModPlus    -> includeMod1 >> return (concat ["_mod1(", w s1, " + ", w s2, ")"])
-        ModMinus   -> includeMod1 >> return (concat ["_mod1(", w s1, " - ", w s2, ")"])
-        ModTimes   -> includeMod1 >> return (concat ["_mtimes(", ds s1, ", ", ds s2, ")"])
-        ModPlusEq  -> includeMod1 >> return (concat [s1, "= _mod1(", wli s1, " + ", w s2, ")"])
-        ModMinusEq -> includeMod1 >> return (concat [s1, "= _mod1(", wli s1, " - ", w s2, ")"])
-        ModTimesEq -> includeMod1 >> return (concat [s1, "= _mtimes(", li s1, ", ", ds s2, ")"])
-        Orig s     -> return $ concat [s1, s, s2]
-    where iac = (include "algorithm" >>) . return . concat
+        Mod        -> includeMod  >> rc ["_mod(", ds s1, ", ", ds s2, ")"]
+        ModPlus    -> includeMod1 >> rc ["_mod1(", w s1, " + ", w s2, ")"]
+        ModMinus   -> includeMod1 >> rc ["_mod1(", w s1, " - ", w s2, ")"]
+        ModTimes   -> includeMod1 >> rc ["_mtimes(", ds s1, ", ", ds s2, ")"]
+        ModPlusEq  -> includeMod1 >> rc [s1, "= _mod1(", wli s1, " + ", w s2, ")"]
+        ModMinusEq -> includeMod1 >> rc [s1, "= _mod1(", wli s1, " - ", w s2, ")"]
+        ModTimesEq -> includeMod1 >> rc [s1, "= _mtimes(", li s1, ", ", ds s2, ")"]
+        Orig s     -> rc [s1, s, s2]
+    where rc = retcat
+          iac = (include "algorithm" >>) . rc
           rs = rstrip
           ds = dstrip
           li = lineify
@@ -408,10 +417,10 @@ chunk1 :: Parser String
 chunk1 = many1 chunkUnit >>= sugarChunk
 
 commaChunk :: Parser String
-commaChunk = concat <$> many commaChunkUnit
+commaChunk = catMany commaChunkUnit
 
 semicChunk :: Parser String
-semicChunk = concat <$> many semicChunkUnit
+semicChunk = catMany semicChunkUnit
 
 chunkList :: Parser [String]
 chunkList = chunk `sepBy` string ","
@@ -442,7 +451,7 @@ postScanCommand skipFlag = do
                 return v) (string ",")
             semic
             forM_ vs $ flip putType t
-            return $ concat [showType t, " ", intercalate ", " vs, "; ", scanfFor skipFlag (map (t,) $ vs)]
+            retcat [showType t, " ", intercalate ", " vs, "; ", scanfFor skipFlag (map (t,) vs)]
         Nothing -> do
             vs <- map (dropWhile isSpace) <$> chunkList
             voidw
@@ -514,12 +523,17 @@ compileMfmtStderr :: Mfmt -> String
 compileMfmtStderr m =
     concat ["fprintf(stderr, ", compileMfmt m, ");"]
 
-postPrintCommand :: Parser String
-postPrintCommand = do
+postPrintCommandAdding :: (Mfmt -> Mfmt) -> Parser String
+postPrintCommandAdding f = do
     m <- mconcat <$> ((macroFormatString <|> macroFormatChunk) `sepBy` (string "," >> waste))
     voidw
     semic
-    return $ compileMfmtStdout m
+    return . compileMfmtStdout $ f m
+postPrintCommand :: Parser String
+postPrintCommand = postPrintCommandAdding id
+postPrintlnCommand :: Parser String
+postPrintlnCommand = postPrintCommandAdding (<> Mfmt [] "\\n")
+
 postDebugPrintCommand :: Parser String
 postDebugPrintCommand = do
     lno <- sourceLine <$> getPosition
@@ -529,12 +543,6 @@ postDebugPrintCommand = do
     voidw
     semic
     return $ compileMfmtStderr (Mfmt [] lnodis <> m <> Mfmt [] "\\n")
-postPrintlnCommand :: Parser String
-postPrintlnCommand = do
-    m <- mconcat <$> ((macroFormatString <|> macroFormatChunk) `sepBy` (string "," >> waste))
-    voidw
-    semic
-    return $ compileMfmtStdout (m <> Mfmt [] "\\n")
 postGetsCommand :: Parser String
 postGetsCommand = do
     voidw
@@ -542,7 +550,7 @@ postGetsCommand = do
     t <- guessTypeMaybe c
     semic
     case t of
-        Just (AArray dim AChar) -> return $ concat ["fgets(", c, ", ", dim, ", stdin);"]
+        Just (AArray dim AChar) -> retcat ["fgets(", c, ", ", dim, ", stdin);"]
         Just _ -> parserFail $ "gets!: guessed type of " ++ show c ++ " not char[*]"
         Nothing -> parserFail $ "gets!: cannot infer type of " ++ show c
 macroCommand :: Parser String
@@ -558,7 +566,7 @@ macroCommand = do
             s <- chunk
             semic
             include "algorithm"
-            return $ concat ["sort(", s, ".begin(), ", s, ".end());"]
+            retcat ["sort(", s, ".begin(), ", s, ".end());"]
         "p" -> postPrintCommand
         "print" -> postPrintCommand
         "pl" -> postPrintlnCommand
@@ -590,7 +598,7 @@ typeCommand = try $ do
         abks <- many $ try arrayBlock
         c <- chunk
         return ((v, map snd abks),
-            concat $ [w1, v, concatMap fst abks, c])) `sepBy` string ","
+            concat [w1, v, concatMap fst abks, c])) `sepBy` string ","
     forM_ ls $ \((v,abks),_) -> putType v (foldr AArray t abks)
     return $ showType t ++ intercalate "," (map snd ls)
 
@@ -599,22 +607,21 @@ braceBlock = do
     voidc '{'
     s <- many stuff
     voidc '}'
-    return $ concat $ "{" : s ++ ["}"]
-    -- return $ B.concat ["{", B.pack (show s), "}"]
+    retcat $ ["{"] ++ s ++ ["}"]
 
 parenBlock :: Parser String
 parenBlock = do
     voidc '('
-    s <- concat <$> many stuff
+    s <- many stuff
     voidc ')'
-    return $ concat ["(", s, ")"]
+    retcat $ ["("] ++ s ++ [")"]
 
 bracketBlock :: Parser String
 bracketBlock = do
     voidc '['
     s <- commaChunk
     voidc ']'
-    return $ concat ["[", s, "]"]
+    retcat ["[", s, "]"]
 
 anyStr1 :: Parser String
 anyStr1 = (:[]) <$> anyChar
@@ -629,16 +636,14 @@ stringLit :: Parser String
 stringLit = do
     voidc '"'
     s <- manyTill (backslashEscape <|> anyStr1) (voidc '"')
-    return . concat $ "\"" : s ++ ["\""]
-    -- return $ B.concat ["{", B.pack (show s), "}"]
+    retcat $ ["\""] ++ s ++ ["\""]
 
 charLit :: Parser String
 charLit = do
     voidc '\''
     s <- backslashEscape <|> anyStr1
     voidc '\''
-    return $ "'" ++ s ++ "'"
-    -- return $ B.concat ["{", B.pack (show s), "}"]
+    retcat ["'", s, "'"]
 
 someLit :: Parser String
 someLit = stringLit <|> charLit
@@ -782,7 +787,7 @@ forStructure = do
     keyword "for"
     voidw
     fc <- forParenContent <|> forContentTilBrace
-    return $ concat ["for (", fc, ")"]
+    retcat ["for (", fc, ")"]
 
 parenContent :: Parser String
 parenContent = do
@@ -798,34 +803,34 @@ ifStructure = do
     keyword "if"
     voidw
     c <- rstrip <$> (parenContent <|> commaChunk)
-    return $ concat ["if (", c, ")"]
+    retcat ["if (", c, ")"]
 
 elseStructure :: Parser String
 elseStructure = do
     keyword "else"
     s <- waste
     t <- option "" ifStructure
-    return $ concat ["else", s, t]
+    retcat ["else", s, t]
 
 whileStructure :: Parser String
 whileStructure = do
     keyword "while"
     voidw
     c <- rstrip <$> (parenContent <|> commaChunk)
-    return $ concat ["while (", c, ")"]
+    retcat ["while (", c, ")"]
 
 switchStructure :: Parser String
 switchStructure = do
     keyword "switch"
     voidw
     c <- rstrip <$> (parenContent <|> commaChunk)
-    return $ concat ["switch (", c, ")"]
+    retcat ["switch (", c, ")"]
 
 postRepeatCommand :: Parser String
 postRepeatCommand = do
     c <- rstrip <$> (parenContent <|> commaChunk)
     v <- getHygienicVariable
-    return $ concat ["for (int ", v, " = ", c, "; ", v, " > 0; --", v, ")"]
+    retcat ["for (int ", v, " = ", c, "; ", v, " > 0; --", v, ")"]
 
 -- More or less something outer-level command-like
 stuff :: Parser String
@@ -844,7 +849,7 @@ stuff =
     <|> semicChunkUnit
 
 allStuff :: Parser String
-allStuff = concat <$> many1 stuff
+allStuff = catMany1 stuff
 
 allStuffDump :: Parser (String, CPP2State, Int -> Int)
 allStuffDump = do
@@ -853,23 +858,23 @@ allStuffDump = do
     incs <- getIncludes
     let otsm = outputToSourceMap st
     let headerLines = "// @betaveros :: generated with cpp2.hs" : ["#include <" ++ x ++ ">" | x <- incs] ++ ["using namespace std;"]
-                        ++ (if hasMod st then ["long long _mod(long long x, long long m) { long long r = x % m; return r < 0 ? r + m : r; }"] else [])
+                        ++ ["long long _mod(long long x, long long m) { long long r = x % m; return r < 0 ? r + m : r; }" | hasMod st]
                         ++ (case mod1Value st of
                             Nothing -> []
                             Just x -> [
                                 "long long _mod1(long long a) { return _mod(a, " ++ show x ++ "); }",
                                 "long long _mtimes(long long a, long long b) { return _mod1(a * b); }"])
-    return (concatMap (++ "\n") headerLines ++ s,
+    return (unlines headerLines ++ s,
         st,
         snd . fromJust . flip Map.lookupLE otsm . max 1 . subtract (length headerLines))
 
 cppCompileParser :: String -> String -> (Int -> Int) -> Parsec String () String
-cppCompileParser orig new f = concat <$> many (try p <|> (:[]) <$> anyChar)
+cppCompileParser orig new f = catMany (try p <|> (:[]) <$> anyChar)
     where p = do
                 void $ string orig
                 void $ string ":"
                 ns <- many1 digit
-                return $ concat [new, ":", show $ f (read ns),
+                retcat [new, ":", show $ f (read ns),
                     "(", orig, ":", ns, ")"]
 
 openInputFile :: String -> String -> IO Handle
