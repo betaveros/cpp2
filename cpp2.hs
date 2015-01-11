@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections, FlexibleContexts #-}
+{-# LANGUAGE TupleSections, FlexibleContexts, ImplicitParams #-}
 -- imports {{{
 import Control.Applicative hiding ((<|>), many)
 import Control.Monad
@@ -12,6 +12,7 @@ import Data.Monoid
 import Data.Maybe
 import Data.Set (Set)
 -- import Debug.Trace
+import System.Directory
 import System.Environment
 import System.IO
 import System.Process
@@ -872,6 +873,7 @@ allStuff = catMany1 stuff
 allStuffDump :: Parser (String, CPP2State, Int -> Int)
 allStuffDump = do
     s <- allStuff
+    eof
     st <- getState
     incs <- getIncludes
     let otsm = outputToSourceMap st
@@ -901,62 +903,114 @@ openInputFile fstem islug =
     openFile (concat [fstem, "-", islug, ".in"]) ReadMode
 
 
-printColoredLine :: String -> Char -> String -> IO ()
+printColoredLine :: (?colorful :: Bool) => String -> Char -> String -> IO ()
 printColoredLine cesc pchar s = do
     let plinestart = (pchar : pchar : ' ' : s) ++ " "
     let pline = plinestart ++ replicate (60 - length plinestart) pchar
-    hPutStrLn stderr $ concat [cesc, pline, [chr 27], "[0m"]
+    hPutStrLn stderr $ if ?colorful
+        then concat [cesc, pline, [chr 27], "[0m"]
+        else pline
 
-printPurpleLine :: Char -> String -> IO ()
+printPurpleLine :: (?colorful :: Bool) => Char -> String -> IO ()
 printPurpleLine = printColoredLine $ chr 27 : "[35m"
 
-printCyanLine :: Char -> String -> IO ()
+printCyanLine :: (?colorful :: Bool) => Char -> String -> IO ()
 printCyanLine = printColoredLine $ chr 27 : "[36m"
 
-mainArg :: String -> [String] -> IO ()
-mainArg arg rs = do
-    let (fstem, frest) = span (/= '.') arg
-    let fname = arg ++ if null frest then ".cpp2" else ""
+parseItAll :: (?colorful :: Bool) => String -> IO (String, CPP2State, Int -> Int)
+parseItAll fname = do
     cont <- readFile fname
-    let fcname = fstem ++ ".cpp"
     case runParser allStuffDump initState fname cont of
-        Left msg -> print msg
-        Right (s, cst, f) -> do
-            let slug = "cpp2 @ " ++ fname
-            writeFile fcname s
-            if "--dump" `elem` rs then putStr s >> print cst else do
-                printCyanLine ':' $ slug ++ " : preprocess OK"
-                (_, _, Just herr, ph) <- createProcess (proc "g++"
-                    [fcname, "-o", fstem, "-O2",
-                        "-fcolor-diagnostics",
-                        "-Wall", "-Wextra",
-                        "-Wconversion", "-Wpointer-arith",
-                        "-Wshadow"]){ std_err = CreatePipe }
-                code <- waitForProcess ph
-                errs <- hGetContents herr
-                case runParser (cppCompileParser fcname fname f) () "g++" errs of
-                    Left emsg -> hPrint stderr emsg
-                    Right es -> hPutStr stderr es
-                case code of
-                    ExitSuccess -> when ("--dry" `notElem` rs) $ do
-                        let p = proc ("./" ++ fstem) []
-                        p' <- case rs of
-                            [] -> do
-                                printPurpleLine '=' slug
-                                return p
-                            (x:_) -> do
-                                printPurpleLine '/' $ concat [slug, " <-", x, ".in"]
-                                h <- openInputFile fstem x
-                                return $ p { std_in = UseHandle h }
-                        (_, _, _, rph) <- createProcess p'
-                        rcode <- waitForProcess rph
-                        exitWith rcode
-                    _ -> exitWith code
+        Left err -> do
+            let ep = errorPos err
+            hPutStr stderr $ sourceName ep
+            hPutChar stderr ':'
+            hPutStr stderr . show $ sourceLine ep
+            hPutChar stderr ':'
+            hPutStr stderr . show $ sourceColumn ep
+            hPutStr stderr " | "
+            hPutStrLn stderr . intercalate " / " . tail . lines . show $ err
+            exitWith (ExitFailure 1)
+        Right x -> return x
+
+msgOf :: String -> String -> String
+msgOf fname msg = concat ["cpp2 @ ", fname, " : ", msg]
+
+processCPP2 :: (?colorful :: Bool, ?isDry :: Bool) => String -> String -> IO ()
+processCPP2 fname fstem = do
+    let fcname = fstem ++ ".cpp"
+    (s, _, f) <- parseItAll fname
+    writeFile fcname s
+    printCyanLine ':' $ msgOf fname "preprocess OK"
+    (_, _, Just herr, ph) <- createProcess (proc "g++" (
+        [fcname, "-O2",
+            "-Wall", "-Wextra",
+            "-Wconversion", "-Wpointer-arith",
+            "-Wshadow"]
+            ++ ["-fcolor-diagnostics" | ?colorful]
+            ++ if ?isDry then ["-fsyntax-only"] else ["-o", fstem])
+            ){ std_err = CreatePipe }
+    code <- waitForProcess ph
+    errs <- hGetContents herr
+    case runParser (cppCompileParser fcname fname f) () "g++" errs of
+        Left emsg -> hPrint stderr emsg
+        Right es -> hPutStr stderr es
+    case code of
+        ExitSuccess -> return ()
+        _ -> exitWith code
+
+fileExistsNewer :: String -> String -> IO Bool
+fileExistsNewer f1 f2 = do
+    e1 <- doesFileExist f1
+    if e1
+        then liftM2 (>=) (getModificationTime f1) (getModificationTime f2)
+        else return False
+
+processIfNecessary :: (?colorful :: Bool, ?isDry :: Bool) => String -> String -> IO ()
+processIfNecessary fname fstem = do
+    xnewer <- fileExistsNewer fstem fname
+    if xnewer
+        then printCyanLine ':' $ msgOf fname "already processed"
+        else processCPP2 fname fstem
+
+mainArg :: String -> [String] -> [String] -> IO ()
+mainArg arg fargs flags = do
+    let (fstem, frest) = span (/= '.') arg
+    let ?colorful = "--no-color" `notElem` flags
+    let fname = arg ++ if null frest then ".cpp2" else ""
+    if "--dump" `elem` flags then do
+            (s, cst, _) <- parseItAll fname
+            putStr s
+            when ("--state" `elem` flags) $ hPrint stderr cst
+        else do
+            let ?isDry = "--dry" `elem` flags
+            if "--force" `elem` flags
+                then processCPP2 fname fstem
+                else processIfNecessary fname fstem
+            unless ?isDry $ do
+                let p = proc ("./" ++ fstem) []
+                p' <- case fargs of
+                    [] -> do
+                        printPurpleLine '=' fstem
+                        return p
+                    (x:_) -> do
+                        printPurpleLine '/' $ concat [fstem, " <-", x, ".in"]
+                        h <- openInputFile fstem x
+                        return $ p { std_in = UseHandle h }
+                (_, _, _, rph) <- createProcess p'
+                rcode <- waitForProcess rph
+                exitWith rcode
+
+isFlag :: String -> Bool
+isFlag ('-':_) = True
+isFlag _ = False
 -- }}}
+
 main :: IO ()
 main = do
     args <- getArgs
-    case args of
-        [] -> hPutStrLn stderr "cpp2: no input files"
-        (arg:rs) -> mainArg arg rs
+    case partition isFlag args of
+        (["--version"],_) -> putStrLn "C++ Competitive Programming Preprocessor ver. 0.0alpha"
+        (_, []) -> hPutStrLn stderr "cpp2: no input files"
+        (flags, arg:fargs) -> mainArg arg fargs flags
 -- vim:set fdm=marker:
