@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections, FlexibleContexts, ImplicitParams #-}
+{-# LANGUAGE TupleSections, FlexibleContexts, ImplicitParams, LambdaCase #-}
 -- imports {{{
 import Control.Applicative hiding ((<|>), many)
 import Control.Monad
@@ -78,7 +78,8 @@ data CPP2State = CPP2State {
     varMap :: VarMap,
     includes :: Set String,
     hasMod :: Bool,
-    mod1Value :: Maybe Integer
+    mod1Value :: Maybe Integer,
+    noDebug :: Bool
     } deriving Show
 type Parser = Parsec String CPP2State
 
@@ -90,7 +91,8 @@ initState = CPP2State {
     varMap = Map.empty,
     includes = Set.fromList ["cstdio"],
     hasMod = False,
-    mod1Value = Nothing
+    mod1Value = Nothing,
+    noDebug = False
     }
 
 increaseLineNumber :: Parser ()
@@ -549,15 +551,24 @@ postPrintCommand = postPrintCommandAdding id
 postPrintlnCommand :: Parser String
 postPrintlnCommand = postPrintCommandAdding (<> Mfmt [] "\\n")
 
+postDebugBlockCommand :: Parser String
+postDebugBlockCommand = do
+    cont <- braceContent
+    st <- getState
+    voidw
+    return $ if noDebug st then "" else cont
+
 postDebugPrintCommand :: Parser String
 postDebugPrintCommand = do
-    lno <- sourceLine <$> getPosition
-    let lnodis = printf "L%3d:" lno
-    voidw
     m <- mconcat <$> ((macroFormatString <|> macroFormatDebugChunk) `sepBy` (string "," >> waste))
     voidw
     semic
-    return $ compileMfmtStderr (Mfmt [] lnodis <> m <> Mfmt [] "\\n")
+    st <- getState
+    if noDebug st then return "" else do
+        lno <- sourceLine <$> getPosition
+        let lnodis = printf "L%3d:" lno
+        return $ compileMfmtStderr (Mfmt [] lnodis <> m <> Mfmt [] "\\n")
+
 postGetsCommand :: Parser String
 postGetsCommand = do
     voidw
@@ -590,7 +601,7 @@ macroCommand = do
         "pn" -> postPrintlnCommand
         "pln" -> postPrintlnCommand
         "println" -> postPrintlnCommand
-        "d" -> postDebugPrintCommand
+        "d" -> postDebugBlockCommand <|> postDebugPrintCommand
         "r" -> postRepeatCommand
         "rep" -> postRepeatCommand
         "gets" -> postGetsCommand
@@ -621,12 +632,17 @@ typeCommand = try $ do
     return $ showType t ++ intercalate "," (map snd ls)
 -- }}}
 -- brace paren bracket block {{{
-braceBlock :: Parser String
-braceBlock = do
+braceContent :: Parser String
+braceContent = do
     voidc '{'
     s <- many topLevelUnit
     voidc '}'
-    retcat $ ["{"] ++ s ++ ["}"]
+    retcat s
+
+braceBlock :: Parser String
+braceBlock = do
+    s <- braceContent
+    retcat ["{", s, "}"]
 
 parenBlock :: Parser String
 parenBlock = do
@@ -889,6 +905,17 @@ topParser = do
         snd . fromJust . flip Map.lookupLE otsm . max 1 . subtract (length headerLines))
 -- }}}
 -- main {{{
+data FlagSet = FlagSet {
+    fsColorful :: Bool,
+    fsDry :: Bool,
+    fsNoDebug :: Bool
+}
+colorful :: (?fs :: FlagSet) => Bool
+colorful = fsColorful ?fs
+
+isDry :: (?fs :: FlagSet) => Bool
+isDry = fsDry ?fs
+
 cppCompileParser :: String -> String -> (Int -> Int) -> Parsec String () String
 cppCompileParser orig new f = catMany (try p <|> (:[]) <$> anyChar)
     where p = do
@@ -903,24 +930,25 @@ openInputFile fstem islug =
     openFile (concat [fstem, "-", islug, ".in"]) ReadMode
 
 
-printColoredLine :: (?colorful :: Bool) => String -> Char -> String -> IO ()
+printColoredLine :: (?fs :: FlagSet) => String -> Char -> String -> IO ()
 printColoredLine cesc pchar s = do
     let plinestart = (pchar : pchar : ' ' : s) ++ " "
     let pline = plinestart ++ replicate (60 - length plinestart) pchar
-    hPutStrLn stderr $ if ?colorful
+    hPutStrLn stderr $ if colorful
         then concat [cesc, pline, [chr 27], "[0m"]
         else pline
 
-printPurpleLine :: (?colorful :: Bool) => Char -> String -> IO ()
+printPurpleLine :: (?fs :: FlagSet) => Char -> String -> IO ()
 printPurpleLine = printColoredLine $ chr 27 : "[35m"
 
-printCyanLine :: (?colorful :: Bool) => Char -> String -> IO ()
+printCyanLine :: (?fs :: FlagSet) => Char -> String -> IO ()
 printCyanLine = printColoredLine $ chr 27 : "[36m"
 
-parseItAll :: (?colorful :: Bool) => String -> IO (String, CPP2State, Int -> Int)
+parseItAll :: (?fs :: FlagSet) => String -> IO (String, CPP2State, Int -> Int)
 parseItAll fname = do
     cont <- readFile fname
-    case runParser topParser initState fname cont of
+    let st = if fsNoDebug ?fs then initState { noDebug = True } else initState
+    case runParser topParser st fname cont of
         Left err -> do
             let ep = errorPos err
             hPutStr stderr $ sourceName ep
@@ -936,7 +964,7 @@ parseItAll fname = do
 msgOf :: String -> String -> String
 msgOf fname msg = concat ["cpp2 @ ", fname, " : ", msg]
 
-processCPP2 :: (?colorful :: Bool, ?isDry :: Bool) => String -> String -> IO ()
+processCPP2 :: (?fs :: FlagSet) => String -> String -> IO ()
 processCPP2 fname fstem = do
     let fcname = fstem ++ ".cpp"
     (s, _, f) <- parseItAll fname
@@ -947,8 +975,8 @@ processCPP2 fname fstem = do
             "-Wall", "-Wextra",
             "-Wconversion", "-Wpointer-arith",
             "-Wshadow"]
-            ++ ["-fcolor-diagnostics" | ?colorful]
-            ++ if ?isDry then ["-fsyntax-only"] else ["-o", fstem])
+            ++ ["-fcolor-diagnostics" | colorful]
+            ++ if isDry then ["-fsyntax-only"] else ["-o", fstem])
             ){ std_err = CreatePipe }
     code <- waitForProcess ph
     errs <- hGetContents herr
@@ -966,7 +994,7 @@ fileExistsNewer f1 f2 = do
         then liftM2 (>=) (getModificationTime f1) (getModificationTime f2)
         else return False
 
-processIfNecessary :: (?colorful :: Bool, ?isDry :: Bool) => String -> String -> IO ()
+processIfNecessary :: (?fs :: FlagSet) => String -> String -> IO ()
 processIfNecessary fname fstem = do
     xnewer <- fileExistsNewer fstem fname
     if xnewer
@@ -976,18 +1004,20 @@ processIfNecessary fname fstem = do
 mainArg :: String -> [String] -> [String] -> IO ()
 mainArg arg fargs flags = do
     let (fstem, frest) = span (/= '.') arg
-    let ?colorful = "--no-color" `notElem` flags
+    let ?fs = FlagSet {
+        fsColorful = "--no-color" `notElem` flags,
+        fsDry = "--dry" `elem` flags,
+        fsNoDebug = "-n" `elem` flags || "--no-debug" `elem` flags}
     let fname = arg ++ if null frest then ".cpp2" else ""
     if "--dump" `elem` flags then do
             (s, cst, _) <- parseItAll fname
             putStr s
             when ("--state" `elem` flags) $ hPrint stderr cst
         else do
-            let ?isDry = "--dry" `elem` flags
-            if "--force" `elem` flags
+            if fsNoDebug ?fs || "-f" `elem` flags || "--force" `elem` flags
                 then processCPP2 fname fstem
                 else processIfNecessary fname fstem
-            unless ?isDry $ do
+            unless isDry $ do
                 let p = proc ("./" ++ fstem) []
                 p' <- case fargs of
                     [] -> do
