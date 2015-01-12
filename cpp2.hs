@@ -74,7 +74,8 @@ type VarMap = Map String AType
 data CPP2State = CPP2State {
     hygienicRegister :: Int,
     outputLineNumber :: Int,
-    outputToSourceMap :: Map Int Int,
+    outputToSourceDiffMap :: Map Int Int,
+    outputToSourceDiff :: Int,
     varMap :: VarMap,
     includes :: Set String,
     hasMod :: Bool,
@@ -87,7 +88,8 @@ initState :: CPP2State
 initState = CPP2State {
     hygienicRegister = 0,
     outputLineNumber = 1,
-    outputToSourceMap = Map.singleton 1 1,
+    outputToSourceDiffMap = Map.singleton 1 0,
+    outputToSourceDiff = 0,
     varMap = Map.empty,
     includes = Set.fromList ["cstdio"],
     hasMod = False,
@@ -98,13 +100,17 @@ initState = CPP2State {
 increaseLineNumber :: Parser ()
 increaseLineNumber = do
     s <- getState
-    lno <- sourceLine <$> getPosition
     let o = outputLineNumber s + 1
-    let m = outputToSourceMap s
-    putState $ s {
-        outputLineNumber = o,
-        outputToSourceMap = Map.insert o lno m
-        }
+    let oldiff = outputToSourceDiff s
+    ldiff <- subtract o . sourceLine <$> getPosition
+    let m = outputToSourceDiffMap s
+    let s' = s { outputLineNumber = o }
+    putState $ if ldiff == oldiff
+        then s'
+        else s' {
+            outputToSourceDiff = ldiff,
+            outputToSourceDiffMap = Map.insert o ldiff m
+            }
 
 include :: String -> Parser ()
 include inc = modifyState (\st -> st { includes = Set.insert inc (includes st) })
@@ -895,7 +901,7 @@ topParser = do
     eof
     st <- getState
     incs <- getIncludes
-    let otsm = outputToSourceMap st
+    let otsm = outputToSourceDiffMap st
     let headerLines = "// @betaveros :: generated with cpp2.hs" : ["#include <" ++ x ++ ">" | x <- incs] ++ ["using namespace std;"]
                         ++ ["long long _mod(long long x, long long m) { long long r = x % m; return r < 0 ? r + m : r; }" | hasMod st]
                         ++ (case mod1Value st of
@@ -903,9 +909,10 @@ topParser = do
                             Just x -> [
                                 "long long _mod1(long long a) { return _mod(a, " ++ show x ++ "); }",
                                 "long long _mtimes(long long a, long long b) { return _mod1(a * b); }"])
-    return (unlines headerLines ++ s,
-        st,
-        snd . fromJust . flip Map.lookupLE otsm . max 1 . subtract (length headerLines))
+    let f i = let i' = i - length headerLines in
+                        i' + snd (fromJust (Map.lookupLE
+                        (max 1 i') otsm))
+    return (unlines headerLines ++ s, st, f)
 -- }}}
 -- main {{{
 data FlagSet = FlagSet {
