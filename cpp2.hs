@@ -624,14 +624,14 @@ typeCommand = try $ do
 braceBlock :: Parser String
 braceBlock = do
     voidc '{'
-    s <- many stuff
+    s <- many topLevelUnit
     voidc '}'
     retcat $ ["{"] ++ s ++ ["}"]
 
 parenBlock :: Parser String
 parenBlock = do
     voidc '('
-    s <- many stuff
+    s <- many topLevelUnit
     voidc ')'
     retcat $ ["("] ++ s ++ [")"]
 
@@ -786,7 +786,7 @@ forStructContent = do
     return $ compileForStruct v fs
 
 forContent :: Parser String
-forContent = forStructContent <|> allStuff
+forContent = forStructContent <|> topLevel
 
 forContentTilBrace :: Parser String
 forContentTilBrace = forStructContent <|> semicChunk
@@ -812,7 +812,7 @@ parenContent :: Parser String
 parenContent = do
     voidc '('
     voidw
-    c <- allStuff
+    c <- topLevel
     voidw
     voidc ')'
     return c
@@ -851,9 +851,9 @@ postRepeatCommand = do
     v <- getHygienicVariable
     retcat ["for (int ", v, " = ", c, "; ", v, " > 0; --", v, ")"]
 -- }}}
--- stuff = More or less something outer-level command-like {{{
-stuff :: Parser String
-stuff =
+-- More or less something outer-level command-like {{{
+topLevelUnit :: Parser String
+topLevelUnit =
     parenBlock <|> bracketBlock <|> braceBlock
     <|> someLit
     <|> waste1
@@ -867,12 +867,12 @@ stuff =
     <|> chunk1
     <|> semicChunkUnit
 
-allStuff :: Parser String
-allStuff = catMany1 stuff
+topLevel :: Parser String
+topLevel = catMany1 topLevelUnit
 
-allStuffDump :: Parser (String, CPP2State, Int -> Int)
-allStuffDump = do
-    s <- allStuff
+topParser :: Parser (String, CPP2State, Int -> Int)
+topParser = do
+    s <- topLevel
     eof
     st <- getState
     incs <- getIncludes
@@ -888,7 +888,7 @@ allStuffDump = do
         st,
         snd . fromJust . flip Map.lookupLE otsm . max 1 . subtract (length headerLines))
 -- }}}
--- main stuff {{{
+-- main {{{
 cppCompileParser :: String -> String -> (Int -> Int) -> Parsec String () String
 cppCompileParser orig new f = catMany (try p <|> (:[]) <$> anyChar)
     where p = do
@@ -920,7 +920,7 @@ printCyanLine = printColoredLine $ chr 27 : "[36m"
 parseItAll :: (?colorful :: Bool) => String -> IO (String, CPP2State, Int -> Int)
 parseItAll fname = do
     cont <- readFile fname
-    case runParser allStuffDump initState fname cont of
+    case runParser topParser initState fname cont of
         Left err -> do
             let ep = errorPos err
             hPutStr stderr $ sourceName ep
@@ -1005,7 +1005,6 @@ isFlag :: String -> Bool
 isFlag ('-':_) = True
 isFlag _ = False
 -- }}}
-
 main :: IO ()
 main = do
     args <- getArgs
