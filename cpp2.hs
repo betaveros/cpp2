@@ -232,11 +232,14 @@ guessTypeMaybe s = do
         ('*':_) -> return ft
         ('/':_) -> return ft
         ('%':_) -> return ft
-        ('[':_) -> case ft of
-            Just (AVector t) -> return (Just t)
-            Just (ADeque t) -> return (Just t)
-            Just (AArray _ t) -> return (Just t)
-            _ -> return Nothing
+        ('[':_) -> return $ iterate unwrap ft !! bracketDepth
+            where
+                bracketDepth = length $ filter (== '[') rest
+                unwrap = \case
+                    Just (AVector t) -> Just t
+                    Just (ADeque t) -> Just t
+                    Just (AArray _ t) -> Just t
+                    _ -> Nothing
         _ -> return Nothing
 angledType :: Parser AType
 angledType = do
