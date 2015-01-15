@@ -11,14 +11,28 @@ Now, just write
 vector int v;
 int main() {
     s! int n;
-    for i to n {
-        s! int x;
-        v +> x;
-    }
+    sn! v, n;
     sort! v;
     for i to n {
-        int y %< v;
-        p! y;
+        int y %> v;
+        pn! y;
+    }
+}
+```
+and automatically get
+```cpp
+#include <algorithm>
+#include <cstdio>
+#include <vector>
+using namespace std;
+vector<int> v;
+int main() {
+    int n; scanf("%d", &n);
+    for (int _t0 = n; _t0; --_t0) { int _t1; scanf("%d", &_t1); v.push_back(_t1); }
+    sort(v.begin(), v.end());
+    for (int i = 1; i <= n; ++i){
+        int y = v.back(); v.pop_back();
+        printf("%d\n", y);
     }
 }
 ```

@@ -53,9 +53,7 @@ maybeWrap s'
     | otherwise = concat ["(", s, ")"]
     where s = dstrip s'
 ampWrap :: String -> String
-ampWrap s
-    | all isAlpha s = '&' : s
-    | otherwise = "&(" ++ s ++ ")"
+ampWrap s = '&' : maybeWrap s
 -- }}}
 -- generic parser utilities {{{
 retcat :: (Monoid m) => [m] -> Parsec s u m
@@ -489,6 +487,44 @@ postScanCommand skipFlag = do
                     Nothing -> parserFail $ "cannot guess type of " ++ show v
             return . scanfFor skipFlag $ tvs
 
+vectorPushingLoop :: AType -> String -> String -> Parser String
+vectorPushingLoop t vName countExpr = do
+    itv <- getHygienicVariable
+    scv <- getHygienicVariable
+    retcat ["for (int ", itv, " = ", maybeWrap countExpr, "; "
+           , itv
+           , "; --", itv, ") { "
+           , showType t, " ", scv, "; "
+           , scanfFor False [(t, scv)]
+           , " ", maybeWrap vName, ".push_back(", scv, "); }"]
+
+postScanNumberCommand :: Parser String
+postScanNumberCommand = do
+    mt <- optionMaybe knownType
+    cs <- map lstrip <$> chunkList
+    voidw
+    semic
+    case (mt, cs) of
+        (Just vt@(AVector t), [tgt, nExpr]) -> do -- initializer
+            lc <- vectorPushingLoop t tgt nExpr
+            putType tgt vt
+            retcat [showType vt, " ", tgt, "; ", lc]
+        (Just _, _) -> parserFail "scan number only supports initializing vectors"
+        (Nothing, [tgt, nExpr]) -> do
+            ty <- guessTypeMaybe tgt
+            case ty of
+                Just (AArray _ t) -> do
+                    itv <- getHygienicVariable
+                    retcat ["for (int ", itv, " = 0; "
+                           , itv, " < ", maybeWrap nExpr
+                           , "; ++", itv, ") {"
+                           , scanfFor False [(t, tgt ++ "[" ++ itv ++ "]")]
+                           , "}"]
+                Just (AVector t) -> vectorPushingLoop t tgt nExpr
+                Just ty' -> parserFail $ "scan number: cannot handle inferred type " ++ show ty'
+                Nothing -> parserFail $ "scan number: cannot infer type of " ++ show tgt
+        _ -> parserFail "scan number expects 2 args"
+
 data Mfmt = Mfmt [String] String
 instance Monoid Mfmt where
     mempty = Mfmt [] ""
@@ -598,6 +634,7 @@ macroCommand = do
         "scan" -> postScanCommand False
         "s" -> postScanCommand False
         "ss" -> postScanCommand True
+        "sn" -> postScanNumberCommand
         "sort" -> do
             voidw
             s <- chunk
