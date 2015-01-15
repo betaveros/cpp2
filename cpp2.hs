@@ -916,15 +916,27 @@ topParser = do
 -- }}}
 -- main {{{
 data FlagSet = FlagSet {
-    fsColorful :: Bool,
-    fsDry :: Bool,
-    fsNoDebug :: Bool
+    fsPretty :: Bool,
+    fsCheck :: Bool,
+    fsDebug :: Bool,
+    fsForce :: Bool,
+    fsDump :: Bool,
+    fsState :: Bool
 }
-colorful :: (?fs :: FlagSet) => Bool
-colorful = fsColorful ?fs
+initFlagSet :: FlagSet
+initFlagSet = FlagSet {
+    fsPretty = True,
+    fsCheck = False,
+    fsDebug = True,
+    fsForce = False,
+    fsDump = False,
+    fsState = False
+}
+pretty :: (?fs :: FlagSet) => Bool
+pretty = fsPretty ?fs
 
-isDry :: (?fs :: FlagSet) => Bool
-isDry = fsDry ?fs
+isCheck :: (?fs :: FlagSet) => Bool
+isCheck = fsCheck ?fs
 
 cppCompileParser :: String -> String -> (Int -> Int) -> Parsec String () String
 cppCompileParser orig new f = catMany (try p <|> (:[]) <$> anyChar)
@@ -941,12 +953,10 @@ openInputFile fstem islug =
 
 
 printColoredLine :: (?fs :: FlagSet) => String -> Char -> String -> IO ()
-printColoredLine cesc pchar s = do
+printColoredLine cesc pchar s = when pretty $ do
     let plinestart = (pchar : pchar : ' ' : s) ++ " "
     let pline = plinestart ++ replicate (60 - length plinestart) pchar
-    hPutStrLn stderr $ if colorful
-        then concat [cesc, pline, [chr 27], "[0m"]
-        else pline
+    hPutStrLn stderr $ concat [cesc, pline, [chr 27], "[0m"]
 
 printPurpleLine :: (?fs :: FlagSet) => Char -> String -> IO ()
 printPurpleLine = printColoredLine $ chr 27 : "[35m"
@@ -957,7 +967,7 @@ printCyanLine = printColoredLine $ chr 27 : "[36m"
 parseItAll :: (?fs :: FlagSet) => String -> IO (String, CPP2State, Int -> Int)
 parseItAll fname = do
     cont <- readFile fname
-    let st = if fsNoDebug ?fs then initState { noDebug = True } else initState
+    let st = if fsDebug ?fs then initState else initState { noDebug = True }
     case runParser topParser st fname cont of
         Left err -> do
             let ep = errorPos err
@@ -976,7 +986,7 @@ msgOf fname msg = concat ["cpp2 @ ", fname, " : ", msg]
 
 processCPP2 :: (?fs :: FlagSet) => String -> String -> IO ()
 processCPP2 fname fstem = do
-    let fcname = fstem ++ ".cpp"
+    let fcname = fstem ++ if isCheck then ".cpp2-check.cpp" else ".cpp"
     (s, _, f) <- parseItAll fname
     writeFile fcname s
     printCyanLine ':' $ msgOf fname "preprocess OK"
@@ -985,8 +995,8 @@ processCPP2 fname fstem = do
             "-Wall", "-Wextra",
             "-Wconversion", "-Wpointer-arith",
             "-Wshadow"]
-            ++ ["-fcolor-diagnostics" | colorful]
-            ++ if isDry then ["-fsyntax-only"] else ["-o", fstem])
+            ++ ["-fcolor-diagnostics" | pretty]
+            ++ if isCheck then ["-fsyntax-only"] else ["-o", fstem])
             ){ std_err = CreatePipe }
     code <- waitForProcess ph
     errs <- hGetContents herr
@@ -1011,23 +1021,30 @@ processIfNecessary fname fstem = do
         then printCyanLine ':' $ msgOf fname "already processed"
         else processCPP2 fname fstem
 
+updateFlagSet :: FlagSet -> String -> FlagSet
+updateFlagSet fs "--no-pretty" = fs { fsPretty = False }
+updateFlagSet fs "--check"     = fs { fsPretty = False, fsCheck = True, fsForce = True }
+updateFlagSet fs "-n"          = fs { fsDebug = False, fsForce = True }
+updateFlagSet fs "-f"          = fs { fsForce = True }
+updateFlagSet fs "--force"     = fs { fsForce = True }
+updateFlagSet fs "--dump"      = fs { fsDump = True }
+updateFlagSet fs "--state"     = fs { fsState = True }
+updateFlagSet _ f = error $ "Unrecognized flag: " ++ f
+
 mainArg :: String -> [String] -> [String] -> IO ()
 mainArg arg fargs flags = do
     let (fstem, frest) = span (/= '.') arg
-    let ?fs = FlagSet {
-        fsColorful = "--no-color" `notElem` flags,
-        fsDry = "--dry" `elem` flags,
-        fsNoDebug = "-n" `elem` flags || "--no-debug" `elem` flags}
+    let ?fs = foldl' updateFlagSet initFlagSet flags
     let fname = arg ++ if null frest then ".cpp2" else ""
-    if "--dump" `elem` flags then do
+    if fsDump ?fs then do
             (s, cst, _) <- parseItAll fname
             putStr s
-            when ("--state" `elem` flags) $ hPrint stderr cst
+            when (fsState ?fs) $ hPrint stderr cst
         else do
-            if fsNoDebug ?fs || "-f" `elem` flags || "--force" `elem` flags
+            if fsForce ?fs
                 then processCPP2 fname fstem
                 else processIfNecessary fname fstem
-            unless isDry $ do
+            unless isCheck $ do
                 let p = proc ("./" ++ fstem) []
                 p' <- case fargs of
                     [] -> do
