@@ -37,7 +37,7 @@ isHighPrecedence c = isIdentifier c || c `elem` "[](). "
 lstrip :: String -> String
 lstrip = dropWhile (`elem` " \t")
 rstrip :: String -> String
-rstrip = reverse . lstrip . reverse
+rstrip = dropWhileEnd (`elem` " \t")
 dstrip :: String -> String
 dstrip = rstrip . lstrip
 
