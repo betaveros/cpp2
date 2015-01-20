@@ -95,10 +95,10 @@ initState = CPP2State {
     noDebug = False
     }
 
-increaseLineNumber :: Parser ()
-increaseLineNumber = do
+increaseLineNumberBy :: Int -> Parser ()
+increaseLineNumberBy amt = do
     s <- getState
-    let o = outputLineNumber s + 1
+    let o = outputLineNumber s + amt
     let oldiff = outputToSourceDiff s
     ldiff <- subtract o . sourceLine <$> getPosition
     let m = outputToSourceDiffMap s
@@ -109,6 +109,9 @@ increaseLineNumber = do
             outputToSourceDiff = ldiff,
             outputToSourceDiffMap = Map.insert o ldiff m
             }
+
+increaseLineNumber :: Parser ()
+increaseLineNumber = increaseLineNumberBy 1
 
 include :: String -> Parser ()
 include inc = modifyState (\st -> st { includes = Set.insert inc (includes st) })
@@ -138,6 +141,9 @@ getHygienicVariable = do
 -- basic character-class and space parsers {{{
 spaces1 :: Parser String
 spaces1 = many1 ((try endOfLine <* increaseLineNumber) <|> space)
+
+returnSourceLines :: [String] -> Parser String
+returnSourceLines xs = increaseLineNumberBy (length xs) >> return (unlines xs)
 
 voidSpaces1 :: Parser String
 voidSpaces1 = many1 space
@@ -174,6 +180,8 @@ keyword s = try $ string s >> notFollowedBy (satisfy isIdentifier)
 (|=>) :: String -> b -> Parser b
 a |=> b = keyword a >> return b
 
+comma :: Parser ()
+comma = void $ char ','
 semic :: Parser ()
 semic = void $ char ';'
 
@@ -625,6 +633,47 @@ postGetsCommand = do
         Just _ -> parserFail $ "gets!: guessed type of " ++ show c ++ " not char[*]"
         Nothing -> parserFail $ "gets!: cannot infer type of " ++ show c
 -- }}}
+-- nTimes, nCases {{{
+initTestCaseIdentifiers :: Parser (Maybe String, String)
+initTestCaseIdentifiers = do
+    voidw
+    i1 <- identifier
+    voidw
+    i2 <- optionMaybe (comma >> voidw >> identifier <* voidw)
+    semic
+    return $ case i2 of
+        Just x -> (Just i1, x)
+        Nothing -> (Nothing, i1)
+nTimesDriver :: Parser String
+nTimesDriver = do
+    (maybeInitF, tcF) <- initTestCaseIdentifiers
+    returnSourceLines $
+        [ "int main() {"
+        , "    int tcn; scanf(\"%d\", &tcn);"
+        ]
+        ++
+        [ "    " ++ initF ++ "();" | initF <- maybeToList maybeInitF]
+        ++
+        [ "    while (tcn--) " ++ tcF ++ "();"
+        , "    return 0;"
+        , "}"]
+nCasesDriver :: Parser String
+nCasesDriver = do
+    (maybeInitF, tcF) <- initTestCaseIdentifiers
+    returnSourceLines $
+        [ "int main() {"
+        , "    int tcn; scanf(\"%d\", &tcn);"
+        ]
+        ++
+        [ "    " ++ initF ++ "();" | initF <- maybeToList maybeInitF]
+        ++
+        [ "    for (int tci = 1; tci <= tcn; ++tci) {"
+        , "        printf(\"Case #%d: \", tci);"
+        , "        " ++ tcF ++ "();"
+        , "    }"
+        , "    return 0;"
+        , "}"]
+-- }}}
 -- macroCommand {{{
 macroCommand :: Parser String
 macroCommand = do
@@ -652,7 +701,8 @@ macroCommand = do
         "rep" -> postRepeatCommand
         "gets" -> postGetsCommand
         "repeat" -> postRepeatCommand
-        "gcases" -> postRepeatCommand
+        "ntimes" -> nTimesDriver
+        "ncases" -> nCasesDriver
         _ -> parserFail $ "unrecognized macro: " ++ kw
 -- }}}
 -- typeCommand {{{
