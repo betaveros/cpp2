@@ -14,7 +14,7 @@ int main() {
     sn! v, n;
     sort! v;
     for i to n {
-        int y %> v;
+        int y <~ v;
         pn! y;
     }
 }
@@ -53,7 +53,7 @@ I considered that, but ultimately decided the effort wouldn't be worth it. C++ h
 
 The min, max, minify, and maxify operators (`<?`, `>?`, `<?=`, `>?=`) are taken from LiveScript.
 
-The `(push|pop)_(front|back)` operators (`+>`, `%>`, `+<`, `%<`) are my own invention. I wanted to take some Scala-inspired operators (`:+=` and derivatives, with the mnemonic the COLon is on the COLlection side) but it turns out using the colon screws with C indentation, so I took the path of least resistance. `+` is natural for adding elements and `%` (percent) starts with the same letter as `pop`. Primitive, but it'll have to do.
+The `(push|pop)_(front|back)` operators (`~=`, `<~`, `~~=`, `<~~`) are mostly my own invention. I wanted to take some Scala-inspired operators (`:+=` and derivatives, with the mnemonic the COLon is on the COLlection side) but it turns out using the colon screws with C indentation, so I took the path of least resistance and chose something else. `~=` is the operator as it's used in D, as `push_back`. LiveScript has curly arrows for a completely different purpose, but at least that justifies that it looks like an arrow.
 
 ### Why doesn't sugary `for` cache the range it iterates over in some temporary variable? That's expensive.
 

@@ -395,10 +395,10 @@ readSugar "*%"  = Right ModTimes
 readSugar "+%=" = Right ModPlusEq
 readSugar "-%=" = Right ModMinusEq
 readSugar "*%=" = Right ModTimesEq
-readSugar "+>"  = Right PushBack
-readSugar "+<"  = Right PushFront
-readSugar "%>"  = Right PopBack
-readSugar "%<"  = Right PopFront
+readSugar "~="  = Right PushBack
+readSugar "~~=" = Right PushFront
+readSugar "<~"  = Right PopBack
+readSugar "<~~" = Right PopFront
 readSugar "<="  = Left "<="
 readSugar ">="  = Left ">="
 readSugar "!="  = Left "!="
