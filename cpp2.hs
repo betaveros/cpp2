@@ -69,6 +69,7 @@ anyStr1 = (:[]) <$> anyChar
 -- }}}
 -- parser definition, state, state manipulation {{{
 type VarMap = Map String AType
+data LongFormat = LLFormat | I64Format | PRIFormat deriving (Eq, Show)
 data CPP2State = CPP2State {
     hygienicRegister :: Int,
     outputLineNumber :: Int,
@@ -78,6 +79,7 @@ data CPP2State = CPP2State {
     includes :: Set String,
     hasMod :: Bool,
     mod1Value :: Maybe Integer,
+    longFormat :: LongFormat,
     noDebug :: Bool
     } deriving Show
 type Parser = Parsec String CPP2State
@@ -92,6 +94,7 @@ initState = CPP2State {
     includes = Set.fromList ["cstdio"],
     hasMod = False,
     mod1Value = Nothing,
+    longFormat = LLFormat,
     noDebug = False
     }
 
@@ -219,11 +222,18 @@ showType (AList t) = let s = showType t in
 showType (AArray _ _) = error "showType called on AArray"
 showType (AUnknown s) = s
 
-getFmt :: AType -> Maybe String
-getFmt AInt = Just "%d"
-getFmt ALong = Just "%lld"
-getFmt AChar = Just "%c"
-getFmt _ = Nothing
+getFmt :: AType -> Parser (Maybe String)
+getFmt AInt = return $ Just "%d"
+getFmt ALong = do
+    s <- getState
+    case longFormat s of
+        LLFormat -> return $ Just "%lld"
+        I64Format -> return $ Just "%I64d"
+        PRIFormat -> do
+            include "cinttypes"
+            return $ Just "%\" PRId64 \""
+getFmt AChar = return $ Just "%c"
+getFmt _ = return Nothing
 
 putType :: String -> AType -> Parser ()
 putType s t = modifyState (\st -> st { varMap = Map.insert s t (varMap st) })
@@ -462,10 +472,12 @@ chunkList :: Parser [String]
 chunkList = chunk `sepBy` string ","
 -- }}}
 -- scanf, printf {{{
-scanfFor :: Bool -> [(AType, String)] -> String
-scanfFor skipFlag xs = concat [
+scanfFor :: Bool -> [(AType, String)] -> Parser String
+scanfFor skipFlag xs = do
+    fmts <- mapM (getFmt . fst) xs
+    return $ concat [
         "scanf(\"",
-        concat [fromJust (getFmt t) | (t, _) <- xs],
+        concatMap fromJust fmts,
         if skipFlag then " \"" else "\"",
         concat [", " ++ ampWrap v | (_, v) <- xs],
         ");"]
@@ -483,7 +495,8 @@ postScanCommand skipFlag = do
                 return v) (string ",")
             semic
             forM_ vs $ flip putType t
-            retcat [showType t, " ", intercalate ", " vs, "; ", scanfFor skipFlag (map (t,) vs)]
+            scanfRes <- scanfFor skipFlag (map (t,) vs)
+            retcat [showType t, " ", intercalate ", " vs, "; ", scanfRes]
         Nothing -> do
             vs <- map (dropWhile isSpace) <$> chunkList
             voidw
@@ -493,17 +506,18 @@ postScanCommand skipFlag = do
                 case tmt of
                     Just t -> return (t, v)
                     Nothing -> parserFail $ "cannot guess type of " ++ show v
-            return . scanfFor skipFlag $ tvs
+            scanfFor skipFlag tvs
 
 vectorPushingLoop :: AType -> String -> String -> Parser String
 vectorPushingLoop t vName countExpr = do
     itv <- getHygienicVariable
     scv <- getHygienicVariable
+    scanfRes <- scanfFor False [(t, scv)]
     retcat ["for (int ", itv, " = ", maybeWrap countExpr, "; "
            , itv
            , "; --", itv, ") { "
            , showType t, " ", scv, "; "
-           , scanfFor False [(t, scv)]
+           , scanfRes
            , " ", maybeWrap vName, ".push_back(", scv, "); }"]
 
 postScanNumberCommand :: Parser String
@@ -523,10 +537,11 @@ postScanNumberCommand = do
             case ty of
                 Just (AArray _ t) -> do
                     itv <- getHygienicVariable
+                    scanfRes <- scanfFor False [(t, tgt ++ "[" ++ itv ++ "]")]
                     retcat ["for (int ", itv, " = 0; "
                            , itv, " < ", maybeWrap nExpr
                            , "; ++", itv, ") {"
-                           , scanfFor False [(t, tgt ++ "[" ++ itv ++ "]")]
+                           , scanfRes
                            , "}"]
                 Just (AVector t) -> vectorPushingLoop t tgt nExpr
                 Just ty' -> parserFail $ "scan number: cannot handle inferred type " ++ show ty'
@@ -543,7 +558,7 @@ guessFormat c = do
     m <- guessTypeMaybe c
     case m of
         Nothing -> parserFail $ "macro format: cannot infer type of " ++ c
-        Just t -> case getFmt t of
+        Just t -> getFmt t >>= \case
             Just f -> return f
             Nothing -> parserFail $ "macro format: no format specifier for inferred type " ++ show t
 
@@ -674,6 +689,26 @@ nCasesDriver = do
         , "    return 0;"
         , "}"]
 -- }}}
+-- longFormat {{{
+longFormatCommand :: Parser String
+longFormatCommand = do
+    voidw
+    x <- identifier
+    voidw
+    semic
+    voidw
+    case x of
+        "ll"  -> modifyState (\s -> s { longFormat = LLFormat })
+        "lld" -> modifyState (\s -> s { longFormat = LLFormat })
+        "I64" -> modifyState (\s -> s { longFormat = I64Format })
+        "I64d" -> modifyState (\s -> s { longFormat = I64Format })
+        "PRI" -> modifyState (\s -> s { longFormat = PRIFormat })
+        "PRId" -> modifyState (\s -> s { longFormat = PRIFormat })
+        "PRId64" -> modifyState (\s -> s { longFormat = PRIFormat })
+        "cinttypes" -> modifyState (\s -> s { longFormat = PRIFormat })
+        _ -> parserFail $ "unrecognized long format: " ++ x
+    return ""
+-- }}}
 -- macroCommand {{{
 macroCommand :: Parser String
 macroCommand = do
@@ -701,6 +736,9 @@ macroCommand = do
         "rep" -> postRepeatCommand
         "gets" -> postGetsCommand
         "repeat" -> postRepeatCommand
+        "lf" -> longFormatCommand
+        "llf" -> longFormatCommand
+        "longf" -> longFormatCommand
         "ntimes" -> nTimesDriver
         "ncases" -> nCasesDriver
         _ -> parserFail $ "unrecognized macro: " ++ kw
