@@ -347,6 +347,7 @@ checkedIdentifier = do
         "isspace" -> ig "cctype"
         "isupper" -> ig "cctype"
         "list" -> ig "list"
+        "log" -> ig "cmath"
         "make_pair" -> ig "utility"
         "map" -> ig "map"
         "max" -> ig "algorithm"
