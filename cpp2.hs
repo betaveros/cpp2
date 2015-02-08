@@ -709,6 +709,17 @@ longFormatCommand = do
         "cinttypes" -> modifyState (\s -> s { longFormat = PRIFormat })
         _ -> parserFail $ "unrecognized long format: " ++ x
     return ""
+setModCommand :: Parser String
+setModCommand = do
+    voidw
+    x <- idLike
+    voidw
+    semic
+    voidw
+    includeMod
+    st <- getState
+    setState st { mod1Value = Just $ read x }
+    return ""
 -- }}}
 -- macroCommand {{{
 macroCommand :: Parser String
@@ -737,6 +748,7 @@ macroCommand = do
         "rep" -> postRepeatCommand
         "gets" -> postGetsCommand
         "repeat" -> postRepeatCommand
+        "mod" -> setModCommand
         "lf" -> longFormatCommand
         "llf" -> longFormatCommand
         "longf" -> longFormatCommand
