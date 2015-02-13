@@ -1,24 +1,24 @@
 {-# LANGUAGE TupleSections, FlexibleContexts, ImplicitParams, LambdaCase #-}
 -- imports {{{
-import Control.Applicative hiding ((<|>), many)
-import Control.Monad
+import Control.Applicative ((<$>), (<*>), (<*))
+import Control.Monad (forM, forM_, liftM2, unless, void, when)
 import Data.Foldable (foldrM)
 -- import Data.Function
-import Data.Functor.Identity
-import Data.Char
-import Data.List
+import Data.Functor.Identity (Identity)
+import Data.Char (chr, isAlpha, isDigit, isSpace)
+import Data.List (dropWhileEnd, foldl', intercalate, isSuffixOf, partition)
 import Data.Map (Map)
-import Data.Monoid
-import Data.Maybe
+import Data.Monoid (Monoid(..), (<>), mconcat)
+import Data.Maybe (fromJust, maybeToList)
 import Data.Set (Set)
 -- import Debug.Trace
-import System.Directory
-import System.Environment
-import System.IO
-import System.Process
-import System.Exit
-import Text.Parsec
-import Text.Printf
+import System.Directory (doesFileExist, getModificationTime)
+import System.Environment (getArgs)
+import System.IO (Handle, IOMode(..), stderr, hGetContents, hPrint, hPutChar, hPutStr, hPutStrLn, openFile)
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, waitForProcess )
+import System.Exit (exitWith, ExitCode(..))
+import Text.Parsec (Parsec, Stream, (<|>), anyChar, char, digit, endOfLine, eof, errorPos, getPosition, getState, lookAhead, many, many1, manyTill, modifyState, notFollowedBy, oneOf, option, optionMaybe, parserFail, putState, satisfy, sepBy, sepBy1, setState, sourceColumn, sourceName, sourceLine, space, string, try, runParser)
+import Text.Printf (printf)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 -- }}}
