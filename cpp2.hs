@@ -6,7 +6,7 @@ import Data.Foldable (foldrM)
 -- import Data.Function
 import Data.Functor.Identity (Identity)
 import Data.Char (chr, isAlpha, isDigit, isSpace)
-import Data.List (dropWhileEnd, foldl', intercalate, isSuffixOf, partition)
+import Data.List (dropWhileEnd, foldl', intercalate, isSuffixOf, partition, unfoldr)
 import Data.Map (Map)
 import Data.Monoid (Monoid(..), (<>), mconcat)
 import Data.Maybe (fromJust, maybeToList)
@@ -47,10 +47,28 @@ lineify = dstrip . map f
           f '\r' = ' '
           f c = c
 
+needsWrapping :: String -> Bool
+needsWrapping xs = not . and $ unfoldr go xs
+    where go :: String -> Maybe (Bool, String)
+          go [] = Nothing
+          go (x:xs) = Just $ goj x xs
+
+          goj :: Char -> String -> (Bool, String)
+          goj '(' s = (True, goTill ')' s)
+          goj '[' s = (True, goTill ']' s)
+          goj '{' s = (True, goTill '}' s)
+          goj  c  s = (isHighPrecedence c, s)
+
+          goTill :: Char -> String -> String
+          goTill c [] = error $ "In needsWrapping: seeking '" ++ [c] ++ "' not found"
+          goTill c (x:xs)
+              | c == x = xs
+              | otherwise = goTill c $ snd (goj x xs)
+
 maybeWrap :: String -> String
 maybeWrap s'
-    | all isHighPrecedence s = s
-    | otherwise = concat ["(", s, ")"]
+    | needsWrapping s = concat ["(", s, ")"]
+    | otherwise = s
     where s = dstrip s'
 ampWrap :: String -> String
 ampWrap s = '&' : maybeWrap s
@@ -1016,7 +1034,7 @@ postRepeatCommand = do
 -- }}}
 -- More or less something outer-level command-like {{{
 topLevelUnit :: Parser String
-topLevelUnit = braceBlock
+topLevelUnit = waste1 <|> braceBlock
     <|> macroCommand
     <|> typeCommand
     <|> ifStructure
