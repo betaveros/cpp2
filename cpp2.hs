@@ -391,7 +391,7 @@ data LPSymbol = Min | Max | Minify | Maxify
     | Mod | ModPlus | ModMinus | ModTimes
     | ModPlusEq | ModMinusEq | ModTimesEq
     | PushBack | PushFront | PopBack | PopFront
-    | Orig String
+    | Orig String deriving Show
 
 readSugar :: String -> Either String LPSymbol
 readSugar "<?"  = Right Min
@@ -453,7 +453,7 @@ combineAroundSymbol (s1,sym) s2 = case sym of
           wli = maybeWrap . lineify
 
 sugarChunk :: [String] -> Parser String
-sugarChunk c = let (sl, sf) = readSugarList c
+sugarChunk c = let (sl, sf) = {- traceShowId $ -} readSugarList c
     in foldrM combineAroundSymbol sf sl
 -- }}}
 
@@ -1016,10 +1016,7 @@ postRepeatCommand = do
 -- }}}
 -- More or less something outer-level command-like {{{
 topLevelUnit :: Parser String
-topLevelUnit =
-    parenBlock <|> bracketBlock <|> braceBlock
-    <|> someLit
-    <|> waste1
+topLevelUnit = braceBlock
     <|> macroCommand
     <|> typeCommand
     <|> ifStructure
