@@ -222,7 +222,7 @@ macroKeyword = try $ do
     return s
 -- }}}
 -- fake type system {{{
-data AType = AInt | ALong | AChar
+data AType = AInt | ALong | AChar | ASizeT
     | AArray String AType
     | AVector AType | ADeque AType | AList AType
     | AUnknown String deriving (Eq, Show)
@@ -231,6 +231,7 @@ showType :: AType -> String
 showType AInt = "int"
 showType ALong = "long long"
 showType AChar = "char"
+showType ASizeT = "size_t"
 showType (AVector t) = let s = showType t in
     concat ["vector<", s, if ">" `isSuffixOf` s then " >" else ">"]
 showType (ADeque t) = let s = showType t in
@@ -250,6 +251,7 @@ getFmt ALong = do
         PRIFormat -> do
             include "cinttypes"
             return $ Just "%\" PRId64 \""
+getFmt ASizeT = return $ Just "%zu"
 getFmt AChar = return $ Just "%c"
 getFmt _ = return Nothing
 
@@ -267,6 +269,7 @@ guessTypeMaybe s = do
     ft <- getTypeMaybe front
     case rest of
         "" -> return ft
+        ".size()" -> return $ Just ASizeT
         ('+':_) -> return ft
         ('-':_) -> return ft
         ('*':_) -> return ft
@@ -310,6 +313,7 @@ knownType =
     "int" |=> AInt
     <|> "ll" |=> ALong
     <|> "long" |=> ALong
+    <|> "size_t" |=> ASizeT
     <|> "char" |=> AChar
     <|> knownVectorType
     <|> knownDequeType
